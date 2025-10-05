@@ -1,4 +1,3 @@
-
 import React, { useEffect, useMemo, useState } from "react";
 import { ethers } from "ethers";
 
@@ -39,23 +38,12 @@ const enrollmentAbi = [
 
 const rulesAbi = [
   "event RuleSet(uint16 indexed code, bool enabled, uint256 price, uint16 maxPerYear, string label)",
-  "event RuleToggled(uint16 indexed code, bool enabled)",
-  "event RulePriceSet(uint16 indexed code, uint256 price)",
-  "event RuleMaxPerYearSet(uint16 indexed code, uint16 maxPerYear)",
-  "event RuleLabelSet(uint16 indexed code, string label)",
   "function getRule(uint16 code) view returns (bool enabled, uint256 price, uint16 maxPerYear)",
-  "function setRule(uint16 code, bool enabled, uint256 price, uint16 maxPerYear, string label)",
-  "function setEnabled(uint16 code, bool enabled)",
-  "function setPrice(uint16 code, uint256 price)",
-  "function setMaxPerYear(uint16 code, uint16 maxPerYear)",
-  "function setLabel(uint16 code, string label)"
+  "function setRule(uint16 code, bool enabled, uint256 price, uint16 maxPerYear, string label)"
 ];
 
 const bankAbi = [
   "event PaymentExecuted(uint256 indexed claimId, address indexed to, uint256 amount, uint256 vaultBalanceAfter)",
-  "function token() view returns (address)",
-  "function engine() view returns (address)",
-  "function setEngine(address e)",
   "function vaultBalance() view returns (uint256)"
 ];
 
@@ -64,7 +52,6 @@ const claimEngineAbi = [
   "event ClaimRejected(bytes32 indexed claimKey, address indexed provider, uint16 code, uint16 year, string reason)",
   "function paused() view returns (bool)",
   "function setPaused(bool)",
-  "function claimKeyOf(uint256 id) view returns (bytes32)",
   "function submit(bytes32 patientId, uint16 code, uint16 year)"
 ];
 
@@ -84,12 +71,9 @@ const ADDRS = {
 
 function fmtUSDC(x?: bigint) {
   if (x === undefined) return "-";
-  // 6 decimals
   const whole = x / 1_000_000n;
-  const frac = (x % 1_000_000n).toString().padStart(6, "0");
-  // trim trailing zeros for nicer display
-  const fracTrim = frac.replace(/0+$/, "");
-  return fracTrim.length ? `${whole.toString()}.${fracTrim}` : whole.toString();
+  const frac = (x % 1_000_000n).toString().padStart(6, "0").replace(/0+$/, "");
+  return frac ? `${whole}.${frac}` : whole.toString();
 }
 
 function isBytes32Hex(s: string) {
@@ -106,10 +90,9 @@ function useEthers() {
 
   useEffect(() => {
     const init = async () => {
-      if (typeof window === "undefined" || !(window as any).ethereum) return;
+      if (!(window as any).ethereum) return;
       const prov = new ethers.BrowserProvider((window as any).ethereum);
       setProvider(prov);
-
       (window as any).ethereum.on?.("accountsChanged", () => connect());
       (window as any).ethereum.on?.("chainChanged", () => connect());
     };
@@ -119,35 +102,24 @@ function useEthers() {
   const ensureChain = async () => {
     const eth = (window as any).ethereum;
     if (!eth) throw new Error("No wallet");
-    try {
-      const net = await provider!.getNetwork();
-      if (Number(net.chainId) !== CHAIN_ID_DEC) {
-        try {
+    const net = await provider!.getNetwork();
+    if (Number(net.chainId) !== CHAIN_ID_DEC) {
+      try {
+        await eth.request({ method: "wallet_switchEthereumChain", params: [{ chainId: CHAIN_ID_HEX }] });
+      } catch (e: any) {
+        if (e?.code === 4902) {
           await eth.request({
-            method: "wallet_switchEthereumChain",
-            params: [{ chainId: CHAIN_ID_HEX }],
+            method: "wallet_addEthereumChain",
+            params: [{
+              chainId: CHAIN_ID_HEX,
+              chainName: "Base Sepolia",
+              rpcUrls: [RPC_URL],
+              nativeCurrency: { name: "Ethereum", symbol: "ETH", decimals: 18 },
+              blockExplorerUrls: ["https://sepolia.basescan.org"],
+            }],
           });
-        } catch (e: any) {
-          if (e?.code === 4902 || /Unrecognized/i.test(String(e?.message))) {
-            await eth.request({
-              method: "wallet_addEthereumChain",
-              params: [
-                {
-                  chainId: CHAIN_ID_HEX,
-                  chainName: "Base Sepolia",
-                  rpcUrls: [RPC_URL],
-                  nativeCurrency: { name: "Ethereum", symbol: "ETH", decimals: 18 },
-                  blockExplorerUrls: ["https://sepolia.basescan.org"],
-                },
-              ],
-            });
-          } else {
-            throw e;
-          }
-        }
+        } else throw e;
       }
-    } catch (err) {
-      console.error("ensureChain error", err);
     }
   };
 
@@ -175,10 +147,7 @@ function useEthers() {
 
 // ---------- Contracts hook ----------
 function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | null) {
-  const readProvider = useMemo(() => {
-    if (provider) return provider;
-    return new ethers.JsonRpcProvider(RPC_URL);
-  }, [provider]);
+  const readProvider = useMemo<ethers.Provider>(() => provider ?? new ethers.JsonRpcProvider(RPC_URL), [provider]);
 
   const engineR = useMemo(() => ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], readProvider), [readProvider]);
   const engineW = useMemo(() => signer && ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], signer), [signer]);
@@ -190,18 +159,17 @@ function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | 
   const enrollW = useMemo(() => signer && ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, signer), [signer]);
   const bankR = useMemo(() => ADDRS.bank && new ethers.Contract(ADDRS.bank, bankAbi, readProvider), [readProvider]);
 
-  return { engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } as const;
+  return { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } as const;
 }
 
 // ---------- Main App ----------
 export default function App() {
   const { provider, signer, address, chainId, status, connect } = useEthers();
-  const { engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } = useContracts(provider, signer);
+  const { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } = useContracts(provider, signer);
 
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [owner, setOwner] = useState<string>("");
 
-  // role detection
   useEffect(() => {
     (async () => {
       try {
@@ -238,9 +206,11 @@ export default function App() {
         ) : isAdmin === null ? (
           <EmptyState title="Checking role…" subtitle="Reading ClaimEngine.owner()"/>
         ) : isAdmin ? (
-          <AdminConsole address={address} owner={owner} bankR={bankR} engineR={engineR} engineW={engineW} rulesR={rulesR} rulesW={rulesW} provRegR={provRegR} provRegW={provRegW} enrollR={enrollR} enrollW={enrollW} />
+          <AdminConsole address={address} owner={owner} bankR={bankR} engineR={engineR} engineW={engineW}
+            rulesR={rulesR} rulesW={rulesW} provRegR={provRegR} provRegW={provRegW} enrollR={enrollR} enrollW={enrollW}/>
         ) : (
-          <ProviderPortal address={address} engineR={engineR} engineW={engineW} rulesR={rulesR} bankR={bankR} />
+          <ProviderPortal address={address} engineR={engineR} engineW={engineW}
+            rulesR={rulesR} bankR={bankR} readProvider={readProvider}/>
         )}
       </main>
 
@@ -259,34 +229,16 @@ function EmptyState({ title, subtitle }: { title: string; subtitle: string }) {
 }
 
 // ---------- Admin Console ----------
-function AdminConsole({ address, owner, bankR, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW }:{
-  address: string;
-  owner: string;
-  bankR: ethers.Contract | null;
-  engineR: ethers.Contract | null;
-  engineW: ethers.Contract | null;
-  rulesR: ethers.Contract | null;
-  rulesW: ethers.Contract | null;
-  provRegR: ethers.Contract | null;
-  provRegW: ethers.Contract | null;
-  enrollR: ethers.Contract | null;
-  enrollW: ethers.Contract | null;
-}) {
+function AdminConsole({ address, owner, bankR, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW }:any) {
   const [vault, setVault] = useState<bigint>(0n);
   const [paused, setPaused] = useState<boolean>(false);
 
   useEffect(() => {
     (async () => {
       try {
-        if (bankR) {
-          const bal: bigint = await (bankR as any).vaultBalance();
-          setVault(bal);
-        }
-        if (engineR) {
-          const p: boolean = await (engineR as any).paused();
-          setPaused(p);
-        }
-      } catch (e) {}
+        if (bankR) setVault(await (bankR as any).vaultBalance());
+        if (engineR) setPaused(await (engineR as any).paused());
+      } catch {}
     })();
   }, [bankR, engineR]);
 
@@ -294,8 +246,7 @@ function AdminConsole({ address, owner, bankR, engineR, engineW, rulesR, rulesW,
     if (!engineW) return;
     const tx = await (engineW as any).setPaused(!paused);
     await tx.wait();
-    const p: boolean = await (engineR as any).paused();
-    setPaused(p);
+    setPaused(await (engineR as any).paused());
   };
 
   return (
@@ -307,7 +258,9 @@ function AdminConsole({ address, owner, bankR, engineR, engineW, rulesR, rulesW,
           <StatCard label="Admin wallet" value={`${owner.slice(0,6)}…${owner.slice(-4)}`} />
         </div>
         <div className="mt-3">
-          <button onClick={doTogglePause} className="px-3 py-2 rounded bg-indigo-600 text-white">{paused ? "Unpause Engine" : "Pause Engine"}</button>
+          <button onClick={doTogglePause} className="px-3 py-2 rounded bg-indigo-600 text-white">
+            {paused ? "Unpause Engine" : "Pause Engine"}
+          </button>
         </div>
       </section>
 
@@ -500,14 +453,7 @@ function CoverageManager({ enrollR, enrollW }:{ enrollR: ethers.Contract | null;
   );
 }
 
-// ---------- Provider Portal ----------
-function ProviderPortal({ address, engineR, engineW, rulesR, bankR }:{
-  address: string;
-  engineR: ethers.Contract | null;
-  engineW: ethers.Contract | null;
-  rulesR: ethers.Contract | null;
-  bankR: ethers.Contract | null;
-}) {
+function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider }:any) {
   const [patientId, setPatientId] = useState("");
   const [code, setCode] = useState("1");
   const [year, setYear] = useState("2025");
@@ -517,21 +463,14 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR }:{
   const [pricePreview, setPricePreview] = useState<string>("-");
 
   useEffect(() => {
-    (async () => {
-      try {
-        if (bankR) {
-          const bal: bigint = await (bankR as any).vaultBalance();
-          setVault(bal);
-        }
-      } catch {}
-    })();
+    (async () => { if (bankR) setVault(await (bankR as any).vaultBalance()); })();
   }, [bankR]);
 
   useEffect(() => {
     (async () => {
       if (!rulesR || !code) { setPricePreview("-"); return; }
-      const [en, pr, mx] = await (rulesR as any).getRule(Number(code));
-      if (!en || pr === 0n) setPricePreview("disabled"); else setPricePreview(`${fmtUSDC(pr)} USDC`);
+      const [en, pr] = await (rulesR as any).getRule(Number(code));
+      setPricePreview(!en || pr === 0n ? "disabled" : `${fmtUSDC(pr)} USDC`);
     })();
   }, [rulesR, code]);
 
@@ -543,10 +482,9 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR }:{
       const tx = await (engineW as any).submit(patientId, Number(code), Number(year));
       setLastTx(tx.hash);
       const rcpt = await tx.wait();
-      // scan logs for ClaimPaid/ClaimRejected
+      const iface = new ethers.Interface(claimEngineAbi);
       let paid: any | null = null;
       let rejected: any | null = null;
-      const iface = new ethers.Interface(claimEngineAbi);
       for (const log of rcpt.logs) {
         try {
           const parsed = iface.parseLog(log);
@@ -555,17 +493,15 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR }:{
         } catch {}
       }
       if (paid) {
-        const amount = paid.args[5] as bigint; // amount
-        const vix = paid.args[6] as number; // visitIndex
+        const amount = paid.args[5] as bigint;
+        const vix = paid.args[6] as number;
         setResult(`✅ Paid ${fmtUSDC(amount)} USDC · visit #${vix}`);
       } else if (rejected) {
-        const reason = rejected.args[4] as string;
-        setResult(`❌ Rejected: ${reason}`);
+        setResult(`❌ Rejected: ${rejected.args[4] as string}`);
       } else {
-        setResult("Tx mined, no event parsed (check explorer)");
+        setResult("Tx mined, no event parsed");
       }
-      // refresh vault
-      try { const bal: bigint = await (bankR as any).vaultBalance(); setVault(bal); } catch {}
+      try { if (bankR) setVault(await (bankR as any).vaultBalance()); } catch {}
     } catch (e: any) {
       console.error(e);
       setResult(e?.shortMessage || e?.message || "Error");
@@ -607,41 +543,36 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR }:{
         <div className="text-xs text-slate-500 mt-2">If under code price, engine will reject as “bank underfunded”.</div>
       </section>
 
-      <HistoryPanel engineR={engineR} provider={address} />
+      <HistoryPanel engineR={engineR} provider={address} readProvider={readProvider} />
     </div>
   );
 }
 
-function HistoryPanel({ engineR, provider }: { engineR: ethers.Contract | null; provider: string }) {
+function HistoryPanel({ engineR, provider, readProvider }:{ engineR: ethers.Contract | null; provider: string; readProvider: ethers.Provider | null; }) {
   const [items, setItems] = useState<any[]>([]);
-  const [fromBlock, setFromBlock] = useState<string>(""); // optional manual override
+  const [fromBlock, setFromBlock] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  // tune this if you want a larger/smaller window
   const LOOKBACK = 200_000;
 
   const load = async () => {
-    if (!engineR) return;
+    if (!engineR || !readProvider) return;
     setLoading(true); setErr("");
-
     try {
       const providerAddr = provider?.toLowerCase();
-      const to = await (engineR.provider as any).getBlockNumber();
+      const to = await readProvider.getBlockNumber();
 
-      // cursor: manual > saved > default lookback
       const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
       const baseFrom =
         fromBlock ? Number(fromBlock) :
         saved     ? saved :
                     Math.max(to - LOOKBACK, 0);
 
-      // ⚡️ use indexed filters to narrow on the server
       const paidFilter = (engineR as any).filters?.ClaimPaid?.(null, null, provider);
       const rejFilter  = (engineR as any).filters?.ClaimRejected?.(null, provider);
       if (!paidFilter || !rejFilter) throw new Error("Event filters missing (ABI mismatch?)");
 
-      // bounded range query (from…to)
       const [paidLogs, rejLogs] = await Promise.all([
         (engineR as any).queryFilter(paidFilter, baseFrom, to),
         (engineR as any).queryFilter(rejFilter,  baseFrom, to),
@@ -674,10 +605,9 @@ function HistoryPanel({ engineR, provider }: { engineR: ethers.Contract | null; 
         });
       }
 
-      rows.sort((a, b) => a.block - b.block);
+      rows.sort((a,b)=>a.block-b.block);
       setItems(rows.reverse());
 
-      // advance cursor so the next reload is incremental
       localStorage.setItem("claims.fromBlock", String(to + 1));
     } catch (e: any) {
       console.error(e);
@@ -687,15 +617,14 @@ function HistoryPanel({ engineR, provider }: { engineR: ethers.Contract | null; 
     }
   };
 
-  // optional: “load older” shifts window backward by LOOKBACK
   const loadOlder = async () => {
     const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
-    const to = saved ? saved - 1 : undefined;
+    const to = saved ? saved - 1 : 0;
     setFromBlock(String(Math.max((to ?? 0) - LOOKBACK, 0)));
     await load();
   };
 
-  useEffect(() => { load(); /* auto on mount & when engine/provider changes */ }, [engineR, provider]);
+  useEffect(() => { load(); }, [engineR, provider, readProvider]);
 
   return (
     <section className="lg:col-span-3 rounded-2xl border border-slate-200 bg-white p-4">
@@ -703,18 +632,11 @@ function HistoryPanel({ engineR, provider }: { engineR: ethers.Contract | null; 
         <div className="font-semibold">My Claims</div>
         <div className="flex items-center gap-2 text-sm">
           <span>from block</span>
-          <input
-            className="w-28 border rounded px-2 py-1"
-            value={fromBlock}
-            onChange={(e) => setFromBlock(e.target.value)}
-            placeholder="auto"
-          />
+          <input className="w-28 border rounded px-2 py-1" value={fromBlock} onChange={e=>setFromBlock(e.target.value)} placeholder="auto"/>
           <button onClick={load} disabled={loading} className="px-3 py-1 rounded bg-slate-100">
             {loading ? "Loading…" : `Reload (≤ ${LOOKBACK.toLocaleString()} blk)`}
           </button>
-          <button onClick={loadOlder} disabled={loading} className="px-3 py-1 rounded bg-slate-100">
-            Load older
-          </button>
+          <button onClick={loadOlder} disabled={loading} className="px-3 py-1 rounded bg-slate-100">Load older</button>
         </div>
       </div>
       {err && <div className="text-xs text-red-600 mb-2">{err}</div>}
@@ -740,9 +662,7 @@ function HistoryPanel({ engineR, provider }: { engineR: ethers.Contract | null; 
                 <td className="py-2 pr-3">{r.year}</td>
                 <td className="py-2 pr-3">{r.amount ? fmtUSDC(r.amount) : r.reason}</td>
                 <td className="py-2 pr-3">{r.visitIndex ?? "-"}</td>
-                <td className="py-2 pr-3">
-                  <a className="text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${r.tx}`} target="_blank">view</a>
-                </td>
+                <td className="py-2 pr-3"><a className="text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${r.tx}`} target="_blank">view</a></td>
               </tr>
             ))}
             {!items.length && (
@@ -754,5 +674,3 @@ function HistoryPanel({ engineR, provider }: { engineR: ethers.Contract | null; 
     </section>
   );
 }
-
-
