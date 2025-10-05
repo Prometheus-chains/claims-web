@@ -612,46 +612,90 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR }:{
   );
 }
 
-function HistoryPanel({ engineR, provider }:{ engineR: ethers.Contract | null; provider: string; }) {
+function HistoryPanel({ engineR, provider }: { engineR: ethers.Contract | null; provider: string }) {
   const [items, setItems] = useState<any[]>([]);
-  const [fromBlock, setFromBlock] = useState<string>("0");
+  const [fromBlock, setFromBlock] = useState<string>(""); // optional manual override
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string>("");
+
+  // tune this if you want a larger/smaller window
+  const LOOKBACK = 200_000;
 
   const load = async () => {
     if (!engineR) return;
-    const prov = provider?.toLowerCase();
-    const paidLogs = await (engineR as any).queryFilter("ClaimPaid", Number(fromBlock||"0"));
-    const rejLogs = await (engineR as any).queryFilter("ClaimRejected", Number(fromBlock||"0"));
-    const rows: any[] = [];
-    for (const l of paidLogs) {
-      if (l.args?.provider?.toLowerCase() !== prov) continue;
-      rows.push({
-        kind: "paid",
-        id: l.args.id.toString(),
-        code: Number(l.args.code),
-        year: Number(l.args.year),
-        amount: l.args.amount as bigint,
-        visitIndex: Number(l.args.visitIndex),
-        tx: l.transactionHash,
-        block: l.blockNumber,
-      });
+    setLoading(true); setErr("");
+
+    try {
+      const providerAddr = provider?.toLowerCase();
+      const to = await (engineR.provider as any).getBlockNumber();
+
+      // cursor: manual > saved > default lookback
+      const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
+      const baseFrom =
+        fromBlock ? Number(fromBlock) :
+        saved     ? saved :
+                    Math.max(to - LOOKBACK, 0);
+
+      // ⚡️ use indexed filters to narrow on the server
+      const paidFilter = (engineR as any).filters?.ClaimPaid?.(null, null, provider);
+      const rejFilter  = (engineR as any).filters?.ClaimRejected?.(null, provider);
+      if (!paidFilter || !rejFilter) throw new Error("Event filters missing (ABI mismatch?)");
+
+      // bounded range query (from…to)
+      const [paidLogs, rejLogs] = await Promise.all([
+        (engineR as any).queryFilter(paidFilter, baseFrom, to),
+        (engineR as any).queryFilter(rejFilter,  baseFrom, to),
+      ]);
+
+      const rows: any[] = [];
+      for (const l of paidLogs) {
+        if (l.args?.provider?.toLowerCase() !== providerAddr) continue;
+        rows.push({
+          kind: "paid",
+          id: l.args.id.toString(),
+          code: Number(l.args.code),
+          year: Number(l.args.year),
+          amount: l.args.amount as bigint,
+          visitIndex: Number(l.args.visitIndex),
+          tx: l.transactionHash,
+          block: l.blockNumber,
+        });
+      }
+      for (const l of rejLogs) {
+        if (l.args?.provider?.toLowerCase() !== providerAddr) continue;
+        rows.push({
+          kind: "rejected",
+          id: "-",
+          code: Number(l.args.code),
+          year: Number(l.args.year),
+          reason: l.args.reason as string,
+          tx: l.transactionHash,
+          block: l.blockNumber,
+        });
+      }
+
+      rows.sort((a, b) => a.block - b.block);
+      setItems(rows.reverse());
+
+      // advance cursor so the next reload is incremental
+      localStorage.setItem("claims.fromBlock", String(to + 1));
+    } catch (e: any) {
+      console.error(e);
+      setErr(e?.message || "Failed to load history");
+    } finally {
+      setLoading(false);
     }
-    for (const l of rejLogs) {
-      if (l.args?.provider?.toLowerCase() !== prov) continue;
-      rows.push({
-        kind: "rejected",
-        id: "-",
-        code: Number(l.args.code),
-        year: Number(l.args.year),
-        reason: l.args.reason as string,
-        tx: l.transactionHash,
-        block: l.blockNumber,
-      });
-    }
-    rows.sort((a,b)=>a.block-b.block);
-    setItems(rows.reverse());
   };
 
-  useEffect(() => { load(); }, [engineR, provider]);
+  // optional: “load older” shifts window backward by LOOKBACK
+  const loadOlder = async () => {
+    const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
+    const to = saved ? saved - 1 : undefined;
+    setFromBlock(String(Math.max((to ?? 0) - LOOKBACK, 0)));
+    await load();
+  };
+
+  useEffect(() => { load(); /* auto on mount & when engine/provider changes */ }, [engineR, provider]);
 
   return (
     <section className="lg:col-span-3 rounded-2xl border border-slate-200 bg-white p-4">
@@ -659,10 +703,21 @@ function HistoryPanel({ engineR, provider }:{ engineR: ethers.Contract | null; p
         <div className="font-semibold">My Claims</div>
         <div className="flex items-center gap-2 text-sm">
           <span>from block</span>
-          <input className="w-28 border rounded px-2 py-1" value={fromBlock} onChange={e=>setFromBlock(e.target.value)} placeholder="0"/>
-          <button onClick={load} className="px-3 py-1 rounded bg-slate-100">Reload</button>
+          <input
+            className="w-28 border rounded px-2 py-1"
+            value={fromBlock}
+            onChange={(e) => setFromBlock(e.target.value)}
+            placeholder="auto"
+          />
+          <button onClick={load} disabled={loading} className="px-3 py-1 rounded bg-slate-100">
+            {loading ? "Loading…" : `Reload (≤ ${LOOKBACK.toLocaleString()} blk)`}
+          </button>
+          <button onClick={loadOlder} disabled={loading} className="px-3 py-1 rounded bg-slate-100">
+            Load older
+          </button>
         </div>
       </div>
+      {err && <div className="text-xs text-red-600 mb-2">{err}</div>}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="text-left text-slate-500">
@@ -685,11 +740,13 @@ function HistoryPanel({ engineR, provider }:{ engineR: ethers.Contract | null; p
                 <td className="py-2 pr-3">{r.year}</td>
                 <td className="py-2 pr-3">{r.amount ? fmtUSDC(r.amount) : r.reason}</td>
                 <td className="py-2 pr-3">{r.visitIndex ?? "-"}</td>
-                <td className="py-2 pr-3"><a className="text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${r.tx}`} target="_blank">view</a></td>
+                <td className="py-2 pr-3">
+                  <a className="text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${r.tx}`} target="_blank">view</a>
+                </td>
               </tr>
             ))}
             {!items.length && (
-              <tr><td colSpan={7} className="py-6 text-center text-slate-500">No events yet</td></tr>
+              <tr><td colSpan={7} className="py-6 text-center text-slate-500">{loading ? "Loading…" : "No events in range"}</td></tr>
             )}
           </tbody>
         </table>
@@ -697,4 +754,5 @@ function HistoryPanel({ engineR, provider }:{ engineR: ethers.Contract | null; p
     </section>
   );
 }
+
 
