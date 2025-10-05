@@ -1,3 +1,41 @@
+# claims-web — Prometheus Chains
+
+Web console for **claims** on Base: an **Admin Console** for ops + a **Provider Portal** to submit claims and view history.
+
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
+
+> **Status:** Experimental, not audited. Use at your own risk.
+
+---
+
+## ✨ Features
+
+**Admin Console**
+- View vault balance (USDC) via `Bank.vaultBalance()`.
+- Pause / unpause engine (`ClaimEngine.setPaused`).
+- Manage **Rules** (enable/disable, price, `maxPerYear`, label).
+- Manage **Providers** (whitelist + active-year windows).
+- Manage **Coverage** (pseudonymous `patientId` bytes32 + active-year windows).
+
+**Provider Portal**
+- Submit claim: `patientId (bytes32)`, `code (uint16)`, `year (YYYY)`.
+- Live price preview from `Rules.getRule(code)`.
+- Result banner from on-chain events: **Paid** (amount, visit #) or **Rejected** (reason).
+- “My Claims” history (provider-scoped) with **chunked log scanning** to stay under common ~10k block RPC limits.
+
+---
+
+## 🧑‍💻 Quickstart
+
+> Requires **Node 20+** and **pnpm 9+**.  
+> If the app lives in a subfolder (e.g., `claims-web-` or `claims-web/`), `cd` into it first.
+
+```bash
+pnpm i
+pnpm dev
+
+
+
 # React + TypeScript + Vite
 
 This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
