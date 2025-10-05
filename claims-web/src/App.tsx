@@ -147,7 +147,8 @@ function useEthers() {
 
 // ---------- Contracts hook ----------
 function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | null) {
-  const readProvider = useMemo<ethers.Provider>(() => provider ?? new ethers.JsonRpcProvider(RPC_URL), [provider]);
+  // Always use a dedicated RPC for reads (avoids MetaMask’s fetch/CORS/rate limits)
+  const readProvider = useMemo<ethers.Provider>(() => new ethers.JsonRpcProvider(RPC_URL), []);
 
   const engineR = useMemo(() => ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], readProvider), [readProvider]);
   const engineW = useMemo(() => signer && ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], signer), [signer]);
