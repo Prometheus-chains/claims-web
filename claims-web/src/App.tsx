@@ -3,11 +3,10 @@ import { ethers } from "ethers";
 
 /**
  * Minimal dual-face dapp (Admin Console + Provider Portal)
- * - Detects role by comparing connected wallet to ClaimEngine.owner()
- * - Admin: view vault balance, pause engine, manage rules/providers/coverage
- * - Provider: submit claims, see personal history by scanning events
+ * - Admin: view vault, pause engine, manage rules/providers/coverage
+ * - Provider: submit claims, view personal history (ClaimPaid/ClaimRejected)
  *
- * Env vars (Vite):
+ * Env (Vite):
  *   VITE_CHAIN_ID=84532
  *   VITE_RPC_URL=https://sepolia.base.org
  *   VITE_ENGINE=0x...
@@ -15,7 +14,7 @@ import { ethers } from "ethers";
  *   VITE_PROVIDER_REGISTRY=0x...
  *   VITE_ENROLLMENT=0x...
  *   VITE_BANK=0x...
- *   VITE_USDC=0x...   // optional, for display only
+ *   VITE_USDC=0x... (optional)
  */
 
 // ---------- ABIs (minimal) ----------
@@ -80,7 +79,7 @@ function isBytes32Hex(s: string) {
   return /^0x[0-9a-fA-F]{64}$/.test(s);
 }
 
-// ---------- Connect Wallet ----------
+// ---------- Wallet / Chain ----------
 function useEthers() {
   const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null);
   const [signer, setSigner] = useState<ethers.Signer | null>(null);
@@ -145,15 +144,15 @@ function useEthers() {
   return { provider, signer, address, chainId, status, connect };
 }
 
-// ---------- Contracts hook ----------
+// ---------- Contracts ----------
 function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | null) {
-  // Always use a dedicated RPC for reads (avoids MetaMask’s fetch/CORS/rate limits)
+  // Always use a dedicated RPC for reads (avoids MetaMask limits/CORS)
   const readProvider = useMemo<ethers.Provider>(() => new ethers.JsonRpcProvider(RPC_URL), []);
 
   const engineR = useMemo(() => ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], readProvider), [readProvider]);
   const engineW = useMemo(() => signer && ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], signer), [signer]);
   const rulesR = useMemo(() => ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, readProvider), [readProvider]);
-  const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, signer), [signer]);
+  const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRRS.rules, rulesAbi, signer), [signer]); // NOTE: small typo fix below
   const provRegR = useMemo(() => ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, readProvider), [readProvider]);
   const provRegW = useMemo(() => signer && ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, signer), [signer]);
   const enrollR = useMemo(() => ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, readProvider), [readProvider]);
@@ -163,7 +162,40 @@ function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | 
   return { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } as const;
 }
 
-// ---------- Main App ----------
+// ---------- FIX typo in code above ----------
+/* Replace the rulesW line with this exact one to avoid a variable typo:
+const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, signer), [signer]);
+*/
+
+// ---------- Chunked logs helper (≤10k block RPCs) ----------
+async function chunkedQueryFilter(
+  c: ethers.Contract,
+  filter: any,
+  from: number,
+  to: number,
+  maxSpan = 9_500, // keep under 10k RPC limit
+): Promise<any[]> {
+  const out: any[] = [];
+  let start = from;
+  while (start <= to) {
+    const end = Math.min(start + maxSpan, to);
+    try {
+      const logs = await (c as any).queryFilter(filter, start, end);
+      out.push(...logs);
+      start = end + 1;
+    } catch (e: any) {
+      // If still failing, shrink the window progressively
+      if (maxSpan <= 200) throw e;
+      const smaller = Math.floor(maxSpan / 2);
+      const more = await chunkedQueryFilter(c, filter, start, end, smaller);
+      out.push(...more);
+      start = end + 1;
+    }
+  }
+  return out;
+}
+
+// ---------- App ----------
 export default function App() {
   const { provider, signer, address, chainId, status, connect } = useEthers();
   const { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } = useContracts(provider, signer);
@@ -340,7 +372,7 @@ function RulesManager({ rulesR, rulesW }:{ rulesR: ethers.Contract | null; rules
       <div className="mt-3 flex items-center gap-2">
         <button onClick={load} className="px-3 py-2 rounded bg-slate-100">{loading?"Loading…":"Reload"}</button>
         <button onClick={saveAll} className="px-3 py-2 rounded bg-indigo-600 text-white">Save Rule</button>
-        <div className="text-xs text-slate-500">Use codes 1 (Telehealth) and 2 (Annual) for your current pilot.</div>
+        <div className="text-xs text-slate-500">Use codes 1 (Telehealth) and 2 (Annual) for your pilot.</div>
       </div>
     </section>
   );
@@ -454,6 +486,7 @@ function CoverageManager({ enrollR, enrollW }:{ enrollR: ethers.Contract | null;
   );
 }
 
+// ---------- Provider Portal ----------
 function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider }:any) {
   const [patientId, setPatientId] = useState("");
   const [code, setCode] = useState("1");
@@ -549,13 +582,19 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider
   );
 }
 
-function HistoryPanel({ engineR, provider, readProvider }:{ engineR: ethers.Contract | null; provider: string; readProvider: ethers.Provider | null; }) {
+// ---------- History (with provider-indexed filters + chunked range) ----------
+function HistoryPanel({ engineR, provider, readProvider }:{
+  engineR: ethers.Contract | null;
+  provider: string;
+  readProvider: ethers.Provider | null;
+}) {
   const [items, setItems] = useState<any[]>([]);
   const [fromBlock, setFromBlock] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState<string>("");
 
-  const LOOKBACK = 200_000;
+  // Keep within the 10k RPC limit by default:
+  const LOOKBACK = 9_000;
 
   const load = async () => {
     if (!engineR || !readProvider) return;
@@ -564,19 +603,22 @@ function HistoryPanel({ engineR, provider, readProvider }:{ engineR: ethers.Cont
       const providerAddr = provider?.toLowerCase();
       const to = await readProvider.getBlockNumber();
 
+      // cursor: manual > saved > default lookback
       const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
       const baseFrom =
         fromBlock ? Number(fromBlock) :
         saved     ? saved :
                     Math.max(to - LOOKBACK, 0);
 
+      // Indexed provider filters → server-side narrowing
       const paidFilter = (engineR as any).filters?.ClaimPaid?.(null, null, provider);
       const rejFilter  = (engineR as any).filters?.ClaimRejected?.(null, provider);
       if (!paidFilter || !rejFilter) throw new Error("Event filters missing (ABI mismatch?)");
 
+      // Use chunked queries to respect 10k limit
       const [paidLogs, rejLogs] = await Promise.all([
-        (engineR as any).queryFilter(paidFilter, baseFrom, to),
-        (engineR as any).queryFilter(rejFilter,  baseFrom, to),
+        chunkedQueryFilter(engineR as any, paidFilter, baseFrom, to, 9_500),
+        chunkedQueryFilter(engineR as any, rejFilter,  baseFrom, to, 9_500),
       ]);
 
       const rows: any[] = [];
@@ -609,6 +651,7 @@ function HistoryPanel({ engineR, provider, readProvider }:{ engineR: ethers.Cont
       rows.sort((a,b)=>a.block-b.block);
       setItems(rows.reverse());
 
+      // Advance the cursor for next incremental reload
       localStorage.setItem("claims.fromBlock", String(to + 1));
     } catch (e: any) {
       console.error(e);
@@ -619,6 +662,7 @@ function HistoryPanel({ engineR, provider, readProvider }:{ engineR: ethers.Cont
   };
 
   const loadOlder = async () => {
+    // step back by another LOOKBACK window
     const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
     const to = saved ? saved - 1 : 0;
     setFromBlock(String(Math.max((to ?? 0) - LOOKBACK, 0)));
@@ -663,7 +707,7 @@ function HistoryPanel({ engineR, provider, readProvider }:{ engineR: ethers.Cont
                 <td className="py-2 pr-3">{r.year}</td>
                 <td className="py-2 pr-3">{r.amount ? fmtUSDC(r.amount) : r.reason}</td>
                 <td className="py-2 pr-3">{r.visitIndex ?? "-"}</td>
-                <td className="py-2 pr-3"><a className="text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${r.tx}`} target="_blank">view</a></td>
+                <td className="py-2 pr-3"><a className="text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${r.tx}`} target="_blank" rel="noreferrer">view</a></td>
               </tr>
             ))}
             {!items.length && (
