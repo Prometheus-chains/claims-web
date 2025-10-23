@@ -14,7 +14,7 @@ import { ethers } from "ethers";
  *   VITE_PROVIDER_REGISTRY=0x...
  *   VITE_ENROLLMENT=0x...
  *   VITE_BANK=0x...
- *   VITE_USDC=0x... (optional)
+ *   VITE_USDC=0x... (USDC contract to read balances from)
  */
 
 // ---------- ABIs (minimal) ----------
@@ -54,8 +54,9 @@ const claimEngineAbi = [
   "function submit(bytes32 patientId, uint16 code, uint16 year)"
 ];
 
-// NEW: minimal ERC-20 (USDC) read ABI
+// NEW: minimal ERC-20 (USDC) ABI incl. Transfer to live-refresh balance
 const erc20Abi = [
+  "event Transfer(address indexed from, address indexed to, uint256 value)",
   "function balanceOf(address) view returns (uint256)",
   "function decimals() view returns (uint8)"
 ];
@@ -102,6 +103,7 @@ function useEthers() {
       (window as any).ethereum.on?.("chainChanged", () => connect());
     };
     init();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const ensureChain = async () => {
@@ -165,8 +167,11 @@ function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | 
   const enrollW = useMemo(() => signer && ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, signer), [signer]);
   const bankR = useMemo(() => ADDRS.bank && new ethers.Contract(ADDRS.bank, bankAbi, readProvider), [readProvider]);
 
-  // NEW: read-only USDC contract (optional)
-  const usdcR = useMemo(() => ADDRS.usdc && new ethers.Contract(ADDRS.usdc, erc20Abi, readProvider), [readProvider]);
+  // NEW: read-only USDC contract for the balance card (no Bank dependency)
+  const usdcR = useMemo(
+    () => ADDRS.usdc && new ethers.Contract(ADDRS.usdc, erc20Abi, readProvider),
+    [readProvider]
+  );
 
   return { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR, usdcR } as const;
 }
@@ -497,21 +502,43 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider
   const [lastTx, setLastTx] = useState<string>("");
   const [result, setResult] = useState<string>("");
 
-  // NEW: provider's own USDC balance
+  // Connected wallet's USDC balance (from VITE_USDC)
   const [myBal, setMyBal] = useState<bigint>(0n);
 
   const [pricePreview, setPricePreview] = useState<string>("-");
 
-  // Load my USDC balance (if USDC address provided)
+  // Load my USDC balance and subscribe to Transfer events involving me
   useEffect(() => {
-    (async () => {
+    if (!usdcR || !address) return;
+
+    let mounted = true;
+
+    const refresh = async () => {
       try {
-        if (usdcR && address) {
-          const bal: bigint = await (usdcR as any).balanceOf(address);
-          setMyBal(bal);
-        }
+        const b: bigint = await (usdcR as any).balanceOf(address);
+        if (mounted) setMyBal(b);
       } catch {}
-    })();
+    };
+
+    // Filters for transfers affecting this wallet
+    const toMe   = (usdcR as any).filters?.Transfer?.(null, address);
+    const fromMe = (usdcR as any).filters?.Transfer?.(address, null);
+
+    const onXfer = () => { refresh(); };
+
+    // Initial read
+    refresh();
+
+    // Subscribe for live updates
+    try { toMe && usdcR.on(toMe, onXfer); } catch {}
+    try { fromMe && usdcR.on(fromMe, onXfer); } catch {}
+
+    // Cleanup
+    return () => {
+      mounted = false;
+      try { toMe && usdcR.off(toMe, onXfer); } catch {}
+      try { fromMe && usdcR.off(fromMe, onXfer); } catch {}
+    };
   }, [usdcR, address]);
 
   useEffect(() => {
@@ -550,13 +577,8 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider
         setResult("Tx mined, no event parsed");
       }
 
-      // NEW: refresh my USDC balance after the tx
-      try {
-        if (usdcR && address) {
-          const bal: bigint = await (usdcR as any).balanceOf(address);
-          setMyBal(bal);
-        }
-      } catch {}
+      // Also refresh my balance after a submission completes
+      try { if (usdcR && address) setMyBal(await (usdcR as any).balanceOf(address)); } catch {}
     } catch (e: any) {
       console.error(e);
       setResult(e?.shortMessage || e?.message || "Error");
@@ -587,12 +609,12 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider
         <div className="mt-3 text-sm text-slate-600">Price: {pricePreview}</div>
         <div className="mt-3 flex items-center gap-2">
           <button onClick={submit} className="px-3 py-2 rounded bg-emerald-600 text-white">Submit</button>
-          {lastTx && <a className="text-sm text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${lastTx}`} target="_blank">View tx</a>}
+          {lastTx && <a className="text-sm text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${lastTx}`} target="_blank" rel="noreferrer">View tx</a>}
           <div className="text-sm">{result}</div>
         </div>
       </section>
 
-      {/* CHANGED: Replace Vault Snapshot with Account Balance (provider USDC) */}
+      {/* REPLACED: Vault card -> Account Balance (connected wallet USDC) */}
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
         <div className="font-semibold mb-3">Account Balance</div>
         <div className="text-sm">USDC: <b>{fmtUSDC(myBal)} USDC</b></div>
