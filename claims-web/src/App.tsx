@@ -54,6 +54,12 @@ const claimEngineAbi = [
   "function submit(bytes32 patientId, uint16 code, uint16 year)"
 ];
 
+// NEW: minimal ERC-20 (USDC) read ABI
+const erc20Abi = [
+  "function balanceOf(address) view returns (uint256)",
+  "function decimals() view returns (uint8)"
+];
+
 // ---------- Helpers ----------
 const CHAIN_ID_DEC = Number(import.meta.env.VITE_CHAIN_ID || 84532);
 const CHAIN_ID_HEX = "0x" + CHAIN_ID_DEC.toString(16);
@@ -152,20 +158,18 @@ function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | 
   const engineR = useMemo(() => ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], readProvider), [readProvider]);
   const engineW = useMemo(() => signer && ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], signer), [signer]);
   const rulesR = useMemo(() => ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, readProvider), [readProvider]);
-  const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, signer), [signer]); // NOTE: small typo fix below
+  const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, signer), [signer]);
   const provRegR = useMemo(() => ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, readProvider), [readProvider]);
   const provRegW = useMemo(() => signer && ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, signer), [signer]);
   const enrollR = useMemo(() => ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, readProvider), [readProvider]);
   const enrollW = useMemo(() => signer && ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, signer), [signer]);
   const bankR = useMemo(() => ADDRS.bank && new ethers.Contract(ADDRS.bank, bankAbi, readProvider), [readProvider]);
 
-  return { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } as const;
-}
+  // NEW: read-only USDC contract (optional)
+  const usdcR = useMemo(() => ADDRS.usdc && new ethers.Contract(ADDRS.usdc, erc20Abi, readProvider), [readProvider]);
 
-// ---------- FIX typo in code above ----------
-/* Replace the rulesW line with this exact one to avoid a variable typo:
-const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, signer), [signer]);
-*/
+  return { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR, usdcR } as const;
+}
 
 // ---------- Chunked logs helper (≤10k block RPCs) ----------
 async function chunkedQueryFilter(
@@ -184,7 +188,6 @@ async function chunkedQueryFilter(
       out.push(...logs);
       start = end + 1;
     } catch (e: any) {
-      // If still failing, shrink the window progressively
       if (maxSpan <= 200) throw e;
       const smaller = Math.floor(maxSpan / 2);
       const more = await chunkedQueryFilter(c, filter, start, end, smaller);
@@ -198,7 +201,7 @@ async function chunkedQueryFilter(
 // ---------- App ----------
 export default function App() {
   const { provider, signer, address, chainId, status, connect } = useEthers();
-  const { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } = useContracts(provider, signer);
+  const { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR, usdcR } = useContracts(provider, signer);
 
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [owner, setOwner] = useState<string>("");
@@ -243,7 +246,7 @@ export default function App() {
             rulesR={rulesR} rulesW={rulesW} provRegR={provRegR} provRegW={provRegW} enrollR={enrollR} enrollW={enrollW}/>
         ) : (
           <ProviderPortal address={address} engineR={engineR} engineW={engineW}
-            rulesR={rulesR} bankR={bankR} readProvider={readProvider}/>
+            rulesR={rulesR} bankR={bankR} readProvider={readProvider} usdcR={usdcR}/>
         )}
       </main>
 
@@ -487,18 +490,29 @@ function CoverageManager({ enrollR, enrollW }:{ enrollR: ethers.Contract | null;
 }
 
 // ---------- Provider Portal ----------
-function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider }:any) {
+function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider, usdcR }:any) {
   const [patientId, setPatientId] = useState("");
   const [code, setCode] = useState("1");
   const [year, setYear] = useState("2025");
   const [lastTx, setLastTx] = useState<string>("");
   const [result, setResult] = useState<string>("");
-  const [vault, setVault] = useState<bigint>(0n);
+
+  // NEW: provider's own USDC balance
+  const [myBal, setMyBal] = useState<bigint>(0n);
+
   const [pricePreview, setPricePreview] = useState<string>("-");
 
+  // Load my USDC balance (if USDC address provided)
   useEffect(() => {
-    (async () => { if (bankR) setVault(await (bankR as any).vaultBalance()); })();
-  }, [bankR]);
+    (async () => {
+      try {
+        if (usdcR && address) {
+          const bal: bigint = await (usdcR as any).balanceOf(address);
+          setMyBal(bal);
+        }
+      } catch {}
+    })();
+  }, [usdcR, address]);
 
   useEffect(() => {
     (async () => {
@@ -535,7 +549,14 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider
       } else {
         setResult("Tx mined, no event parsed");
       }
-      try { if (bankR) setVault(await (bankR as any).vaultBalance()); } catch {}
+
+      // NEW: refresh my USDC balance after the tx
+      try {
+        if (usdcR && address) {
+          const bal: bigint = await (usdcR as any).balanceOf(address);
+          setMyBal(bal);
+        }
+      } catch {}
     } catch (e: any) {
       console.error(e);
       setResult(e?.shortMessage || e?.message || "Error");
@@ -571,10 +592,10 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider
         </div>
       </section>
 
+      {/* CHANGED: Replace Vault Snapshot with Account Balance (provider USDC) */}
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
-        <div className="font-semibold mb-3">Vault Snapshot</div>
-        <div className="text-sm">Bank balance: <b>{fmtUSDC(vault)} USDC</b></div>
-        <div className="text-xs text-slate-500 mt-2">If under code price, engine will reject as “bank underfunded”.</div>
+        <div className="font-semibold mb-3">Account Balance</div>
+        <div className="text-sm">USDC: <b>{fmtUSDC(myBal)} USDC</b></div>
       </section>
 
       <HistoryPanel engineR={engineR} provider={address} readProvider={readProvider} />
