@@ -604,9 +604,6 @@ function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider
         <div className="text-sm">
           Balance: <b>{fmtUSDC(walletUSDC)} USDC</b>
         </div>
-        <div className="text-xs text-slate-500 mt-2">
-          Auto-refreshes each block. This is the connected wallet’s USDC — not the bank vault.
-        </div>
       </section>
 
       <HistoryPanel engineR={engineR} provider={address} readProvider={readProvider} />
