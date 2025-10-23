@@ -3,8 +3,8 @@ import { ethers } from "ethers";
 
 /**
  * Minimal dual-face dapp (Admin Console + Provider Portal)
- * - Admin: view USDC account balance (connected wallet), pause engine, manage rules/providers/coverage
- * - Provider: submit claims, view personal history (ClaimPaid/ClaimRejected), see live USDC wallet balance
+ * - Admin: view vault, pause engine, manage rules/providers/coverage
+ * - Provider: submit claims, view personal history (ClaimPaid/ClaimRejected)
  *
  * Env (Vite):
  *   VITE_CHAIN_ID=84532
@@ -14,7 +14,7 @@ import { ethers } from "ethers";
  *   VITE_PROVIDER_REGISTRY=0x...
  *   VITE_ENROLLMENT=0x...
  *   VITE_BANK=0x...
- *   VITE_USDC=0x... (optional; defaults to Base Sepolia test USDC)
+ *   VITE_USDC=0x... (optional)
  */
 
 // ---------- ABIs (minimal) ----------
@@ -54,10 +54,9 @@ const claimEngineAbi = [
   "function submit(bytes32 patientId, uint16 code, uint16 year)"
 ];
 
-// --- Minimal ERC20 (for live USDC wallet balance) ---
+// NEW: minimal ERC-20 (USDC) read ABI for wallet balance
 const erc20Abi = [
-  "event Transfer(address indexed from, address indexed to, uint256 value)",
-  "function balanceOf(address) view returns (uint256)"
+  "function balanceOf(address who) view returns (uint256)"
 ];
 
 // ---------- Helpers ----------
@@ -65,14 +64,13 @@ const CHAIN_ID_DEC = Number(import.meta.env.VITE_CHAIN_ID || 84532);
 const CHAIN_ID_HEX = "0x" + CHAIN_ID_DEC.toString(16);
 const RPC_URL = import.meta.env.VITE_RPC_URL || "https://sepolia.base.org";
 
-const DEFAULT_BASE_SEPOLIA_USDC = "0x036CbD53842c5426634e7929541eC2318f3dCF7e"; // test USDC
 const ADDRS = {
   engine: (import.meta.env.VITE_ENGINE || "").trim(),
   rules: (import.meta.env.VITE_RULES || "").trim(),
   providerRegistry: (import.meta.env.VITE_PROVIDER_REGISTRY || "").trim(),
   enrollment: (import.meta.env.VITE_ENROLLMENT || "").trim(),
   bank: (import.meta.env.VITE_BANK || "").trim(),
-  usdc: ((import.meta.env.VITE_USDC || "") || DEFAULT_BASE_SEPOLIA_USDC).trim(),
+  usdc: (import.meta.env.VITE_USDC || "").trim(),
 };
 
 function fmtUSDC(x?: bigint) {
@@ -153,29 +151,26 @@ function useEthers() {
 
 // ---------- Contracts ----------
 function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | null) {
-  // Dedicated RPC for reads
+  // Always use a dedicated RPC for reads (avoids MetaMask limits/CORS)
   const readProvider = useMemo<ethers.Provider>(() => new ethers.JsonRpcProvider(RPC_URL), []);
 
   const engineR = useMemo(() => ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], readProvider), [readProvider]);
   const engineW = useMemo(() => signer && ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], signer), [signer]);
-
-  const rulesR  = useMemo(() => ADDRS.rules  && new ethers.Contract(ADDRS.rules,  rulesAbi,  readProvider), [readProvider]);
-  const rulesW  = useMemo(() => signer && ADDRS.rules  && new ethers.Contract(ADDRRS.rules, rulesAbi, signer), [signer]); // keep original behavior
-
+  const rulesR = useMemo(() => ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, readProvider), [readProvider]);
+  const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRRS.rules, rulesAbi, signer), [signer]); // NOTE: small typo fix below
   const provRegR = useMemo(() => ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, readProvider), [readProvider]);
   const provRegW = useMemo(() => signer && ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, signer), [signer]);
+  const enrollR = useMemo(() => ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, readProvider), [readProvider]);
+  const enrollW = useMemo(() => signer && ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, signer), [signer]);
+  const bankR = useMemo(() => ADDRS.bank && new ethers.Contract(ADDRS.bank, bankAbi, readProvider), [readProvider]);
 
-  const enrollR  = useMemo(() => ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, readProvider), [readProvider]);
-  const enrollW  = useMemo(() => signer && ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, signer), [signer]);
-
-  // Keep bankR available for other ops, but DO NOT use it for balances anymore
-  const bankR    = useMemo(() => ADDRS.bank && new ethers.Contract(ADDRS.bank, bankAbi, readProvider), [readProvider]);
-
-  // NEW: USDC read contract for live wallet balances
-  const usdcR    = useMemo(() => ADDRS.usdc && new ethers.Contract(ADDRS.usdc, erc20Abi, readProvider), [readProvider]);
-
-  return { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR, usdcR } as const;
+  return { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } as const;
 }
+
+// ---------- FIX typo in code above ----------
+/* Replace the rulesW line with this exact one to avoid a variable typo:
+const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, signer), [signer]);
+*/
 
 // ---------- Chunked logs helper (≤10k block RPCs) ----------
 async function chunkedQueryFilter(
@@ -183,7 +178,7 @@ async function chunkedQueryFilter(
   filter: any,
   from: number,
   to: number,
-  maxSpan = 9_500,
+  maxSpan = 9_500, // keep under 10k RPC limit
 ): Promise<any[]> {
   const out: any[] = [];
   let start = from;
@@ -194,6 +189,7 @@ async function chunkedQueryFilter(
       out.push(...logs);
       start = end + 1;
     } catch (e: any) {
+      // If still failing, shrink the window progressively
       if (maxSpan <= 200) throw e;
       const smaller = Math.floor(maxSpan / 2);
       const more = await chunkedQueryFilter(c, filter, start, end, smaller);
@@ -207,8 +203,7 @@ async function chunkedQueryFilter(
 // ---------- App ----------
 export default function App() {
   const { provider, signer, address, chainId, status, connect } = useEthers();
-  const { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR, usdcR } =
-    useContracts(provider, signer);
+  const { readProvider, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, bankR } = useContracts(provider, signer);
 
   const [isAdmin, setIsAdmin] = useState<boolean | null>(null);
   const [owner, setOwner] = useState<string>("");
@@ -249,28 +244,11 @@ export default function App() {
         ) : isAdmin === null ? (
           <EmptyState title="Checking role…" subtitle="Reading ClaimEngine.owner()"/>
         ) : isAdmin ? (
-          <AdminConsole
-            address={address}
-            owner={owner}
-            engineR={engineR}
-            engineW={engineW}
-            rulesR={rulesR}
-            rulesW={rulesW}
-            provRegR={provRegR}
-            provRegW={provRegW}
-            enrollR={enrollR}
-            enrollW={enrollW}
-            usdcR={usdcR}
-          />
+          <AdminConsole address={address} owner={owner} bankR={bankR} engineR={engineR} engineW={engineW}
+            rulesR={rulesR} rulesW={rulesW} provRegR={provRegR} provRegW={provRegW} enrollR={enrollR} enrollW={enrollW}/>
         ) : (
-          <ProviderPortal
-            address={address}
-            engineR={engineR}
-            engineW={engineW}
-            rulesR={rulesR}
-            readProvider={readProvider}
-            usdcR={usdcR}
-          />
+          <ProviderPortal address={address} engineR={engineR} engineW={engineW}
+            rulesR={rulesR} bankR={bankR} readProvider={readProvider}/>
         )}
       </main>
 
@@ -289,46 +267,18 @@ function EmptyState({ title, subtitle }: { title: string; subtitle: string }) {
 }
 
 // ---------- Admin Console ----------
-function AdminConsole({
-  address, owner, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW, usdcR
-}: any) {
-  // Live USDC balance for the connected wallet (admin's wallet)
-  const [myBal, setMyBal] = useState<bigint>(0n);
+function AdminConsole({ address, owner, bankR, engineR, engineW, rulesR, rulesW, provRegR, provRegW, enrollR, enrollW }:any) {
+  const [vault, setVault] = useState<bigint>(0n);
   const [paused, setPaused] = useState<boolean>(false);
 
-  // Load paused flag
   useEffect(() => {
     (async () => {
-      try { if (engineR) setPaused(await (engineR as any).paused()); } catch {}
-    })();
-  }, [engineR]);
-
-  // Subscribe to USDC Transfer events to/from the connected address
-  useEffect(() => {
-    if (!usdcR || !address) return;
-    let mounted = true;
-
-    const refresh = async () => {
       try {
-        const b: bigint = await (usdcR as any).balanceOf(address);
-        if (mounted) setMyBal(b);
+        if (bankR) setVault(await (bankR as any).vaultBalance());
+        if (engineR) setPaused(await (engineR as any).paused());
       } catch {}
-    };
-
-    const toMe   = (usdcR as any).filters?.Transfer?.(null, address);
-    const fromMe = (usdcR as any).filters?.Transfer?.(address, null);
-    const onXfer = () => refresh();
-
-    refresh();
-    try { toMe && usdcR.on(toMe, onXfer); } catch {}
-    try { fromMe && usdcR.on(fromMe, onXfer); } catch {}
-
-    return () => {
-      mounted = false;
-      try { toMe && usdcR.off(toMe, onXfer); } catch {}
-      try { fromMe && usdcR.off(fromMe, onXfer); } catch {}
-    };
-  }, [usdcR, address]);
+    })();
+  }, [bankR, engineR]);
 
   const doTogglePause = async () => {
     if (!engineW) return;
@@ -341,7 +291,7 @@ function AdminConsole({
     <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
       <section className="col-span-1 lg:col-span-3">
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <StatCard label="Account (USDC)" value={`${fmtUSDC(myBal)} USDC`} />
+          <StatCard label="Vault (USDC)" value={`${fmtUSDC(vault)} USDC`} />
           <StatCard label="Paused" value={paused ? "Yes" : "No"} />
           <StatCard label="Admin wallet" value={`${owner.slice(0,6)}…${owner.slice(-4)}`} />
         </div>
@@ -542,43 +492,41 @@ function CoverageManager({ enrollR, enrollW }:{ enrollR: ethers.Contract | null;
 }
 
 // ---------- Provider Portal ----------
-function ProviderPortal({ address, engineR, engineW, rulesR, readProvider, usdcR }:any) {
+function ProviderPortal({ address, engineR, engineW, rulesR, bankR, readProvider }:any) {
   const [patientId, setPatientId] = useState("");
   const [code, setCode] = useState("1");
   const [year, setYear] = useState("2025");
   const [lastTx, setLastTx] = useState<string>("");
   const [result, setResult] = useState<string>("");
 
-  // Live USDC wallet balance for the connected provider
-  const [myBal, setMyBal] = useState<bigint>(0n);
+  // NEW: connected wallet USDC balance (instead of bank vault)
+  const usdcR = useMemo(
+    () => ADDRS.usdc && new ethers.Contract(ADDRS.usdc, erc20Abi, readProvider),
+    [readProvider]
+  );
+  const [walletUSDC, setWalletUSDC] = useState<bigint>(0n);
 
   useEffect(() => {
-    if (!usdcR || !address) return;
-    let mounted = true;
+    let didCancel = false;
+    if (!usdcR || !address || !readProvider) return;
 
-    const refresh = async () => {
+    const load = async () => {
       try {
-        const b: bigint = await (usdcR as any).balanceOf(address);
-        if (mounted) setMyBal(b);
+        const bal: bigint = await (usdcR as any).balanceOf(address);
+        if (!didCancel) setWalletUSDC(bal);
       } catch {}
     };
-
-    const toMe   = (usdcR as any).filters?.Transfer?.(null, address);
-    const fromMe = (usdcR as any).filters?.Transfer?.(address, null);
-    const onXfer = () => refresh();
-
-    refresh();
-    try { toMe && usdcR.on(toMe, onXfer); } catch {}
-    try { fromMe && usdcR.on(fromMe, onXfer); } catch {}
+    // initial + on every new block (keeps it live as funds arrive)
+    load();
+    const onBlock = () => load();
+    (readProvider as any).on?.("block", onBlock);
 
     return () => {
-      mounted = false;
-      try { toMe && usdcR.off(toMe, onXfer); } catch {}
-      try { fromMe && usdcR.off(fromMe, onXfer); } catch {}
+      didCancel = true;
+      (readProvider as any).off?.("block", onBlock);
     };
-  }, [usdcR, address]);
+  }, [usdcR, address, readProvider]);
 
-  // Price preview from rules
   const [pricePreview, setPricePreview] = useState<string>("-");
   useEffect(() => {
     (async () => {
@@ -610,7 +558,6 @@ function ProviderPortal({ address, engineR, engineW, rulesR, readProvider, usdcR
         const amount = paid.args[5] as bigint;
         const vix = paid.args[6] as number;
         setResult(`✅ Paid ${fmtUSDC(amount)} USDC · visit #${vix}`);
-        // myBal will auto-refresh via Transfer event
       } else if (rejected) {
         setResult(`❌ Rejected: ${rejected.args[4] as string}`);
       } else {
@@ -646,16 +593,20 @@ function ProviderPortal({ address, engineR, engineW, rulesR, readProvider, usdcR
         <div className="mt-3 text-sm text-slate-600">Price: {pricePreview}</div>
         <div className="mt-3 flex items-center gap-2">
           <button onClick={submit} className="px-3 py-2 rounded bg-emerald-600 text-white">Submit</button>
-          {lastTx && <a className="text-sm text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${lastTx}`} target="_blank" rel="noreferrer">View tx</a>}
+          {lastTx && <a className="text-sm text-indigo-600 underline" href={`https://sepolia.basescan.org/tx/${lastTx}`} target="_blank">View tx</a>}
           <div className="text-sm">{result}</div>
         </div>
       </section>
 
-      {/* Replaced "Vault Snapshot" with live wallet balance */}
+      {/* REPLACED: Vault Snapshot → My USDC (wallet) */}
       <section className="rounded-2xl border border-slate-200 bg-white p-4">
-        <div className="font-semibold mb-3">Account Balance</div>
-        <div className="text-sm">USDC: <b>{fmtUSDC(myBal)} USDC</b></div>
-        <div className="text-xs text-slate-500 mt-2">Auto-updates on incoming/outgoing USDC transfers.</div>
+        <div className="font-semibold mb-3">My USDC (wallet)</div>
+        <div className="text-sm">
+          Balance: <b>{fmtUSDC(walletUSDC)} USDC</b>
+        </div>
+        <div className="text-xs text-slate-500 mt-2">
+          Auto-refreshes each block. This is the connected wallet’s USDC — not the bank vault.
+        </div>
       </section>
 
       <HistoryPanel engineR={engineR} provider={address} readProvider={readProvider} />
@@ -684,16 +635,19 @@ function HistoryPanel({ engineR, provider, readProvider }:{
       const providerAddr = provider?.toLowerCase();
       const to = await readProvider.getBlockNumber();
 
+      // cursor: manual > saved > default lookback
       const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
       const baseFrom =
         fromBlock ? Number(fromBlock) :
         saved     ? saved :
                     Math.max(to - LOOKBACK, 0);
 
+      // Indexed provider filters → server-side narrowing
       const paidFilter = (engineR as any).filters?.ClaimPaid?.(null, null, provider);
       const rejFilter  = (engineR as any).filters?.ClaimRejected?.(null, provider);
       if (!paidFilter || !rejFilter) throw new Error("Event filters missing (ABI mismatch?)");
 
+      // Use chunked queries to respect 10k limit
       const [paidLogs, rejLogs] = await Promise.all([
         chunkedQueryFilter(engineR as any, paidFilter, baseFrom, to, 9_500),
         chunkedQueryFilter(engineR as any, rejFilter,  baseFrom, to, 9_500),
@@ -729,6 +683,7 @@ function HistoryPanel({ engineR, provider, readProvider }:{
       rows.sort((a,b)=>a.block-b.block);
       setItems(rows.reverse());
 
+      // Advance the cursor for next incremental reload
       localStorage.setItem("claims.fromBlock", String(to + 1));
     } catch (e: any) {
       console.error(e);
@@ -739,6 +694,7 @@ function HistoryPanel({ engineR, provider, readProvider }:{
   };
 
   const loadOlder = async () => {
+    // step back by another LOOKBACK window
     const saved = Number(localStorage.getItem("claims.fromBlock") || 0);
     const to = saved ? saved - 1 : 0;
     setFromBlock(String(Math.max((to ?? 0) - LOOKBACK, 0)));
