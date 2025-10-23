@@ -157,7 +157,7 @@ function useContracts(provider: ethers.Provider | null, signer: ethers.Signer | 
   const engineR = useMemo(() => ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], readProvider), [readProvider]);
   const engineW = useMemo(() => signer && ADDRS.engine && new ethers.Contract(ADDRS.engine, [...claimEngineAbi, ...accessControlledAbi], signer), [signer]);
   const rulesR = useMemo(() => ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, readProvider), [readProvider]);
-  const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRRS.rules, rulesAbi, signer), [signer]); // NOTE: small typo fix below
+  const rulesW = useMemo(() => signer && ADDRS.rules && new ethers.Contract(ADDRS.rules, rulesAbi, signer), [signer]); // NOTE: small typo fix below
   const provRegR = useMemo(() => ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, readProvider), [readProvider]);
   const provRegW = useMemo(() => signer && ADDRS.providerRegistry && new ethers.Contract(ADDRS.providerRegistry, providerRegistryAbi, signer), [signer]);
   const enrollR = useMemo(() => ADDRS.enrollment && new ethers.Contract(ADDRS.enrollment, enrollmentAbi, readProvider), [readProvider]);
