@@ -228,7 +228,7 @@ export default function App() {
         <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
           <div className="font-semibold">Claims Demo · Base Sepolia</div>
           <div className="flex items-center gap-3">
-            <span className="text-sm text-slate-600">Chain: {chainId || "-"}</span>
+            <span className="text-sm text-slate-600">Wallet: {chainId || "-"}</span>
             {address ? (
               <span className="px-3 py-1 rounded-full bg-slate-100 text-sm">{address.slice(0,6)}…{address.slice(-4)}</span>
             ) : (
